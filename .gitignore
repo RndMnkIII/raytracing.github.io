@@ -2,3 +2,10 @@
 
 build/
 /*.ppm
+
+# VexRiscV port build artifacts
+src/InOneWeekend_vexriscv/app_pc
+src/InOneWeekend_vexriscv/app_pc_full
+src/InOneWeekend_vexriscv/app.elf
+src/InOneWeekend_vexriscv/*.o
+src/InOneWeekend_vexriscv/**/*.o
