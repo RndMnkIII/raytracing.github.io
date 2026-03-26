@@ -1,0 +1,6 @@
+# Build artifacts
+app_pc
+app_pc_s*
+app.elf
+*.o
+*.d

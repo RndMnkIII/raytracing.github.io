@@ -1,0 +1,64 @@
+/* compat/algorithm — Minimal std::sort, std::begin, std::end for openfpgaOS
+ *
+ * When OF_PC is defined (native PC build) this header simply includes the
+ * real <algorithm> from the system so that correctness tests work on the host.
+ *
+ * The standard <algorithm> header is part of libstdc++, which is not available
+ * in the SDK's freestanding build environment.
+ *
+ * This header provides:
+ *
+ *   std::sort(first, last, comp)
+ *     Insertion sort — O(n²) worst-case but simple and dependency-free.
+ *     BVH construction is a build-time (not render-time) operation and
+ *     operates on arrays of at most a few thousand elements, so O(n²) is
+ *     acceptable.  Elements are rearranged by swapping (three assignments),
+ *     which keeps reference-count churn minimal for shared_ptr elements.
+ *
+ *   std::begin(container) / std::end(container)
+ *     Forwarding helpers that call container.begin() / container.end().
+ *     This is sufficient for std::vector (pointer iterators) used in bvh.h.
+ */
+#ifndef _OF_COMPAT_ALGORITHM_H
+#define _OF_COMPAT_ALGORITHM_H
+
+#ifdef OF_PC
+/* Native PC build: use the real C++ standard library. */
+#include <algorithm>
+#else /* embedded VexRiscV build */
+
+namespace std {
+
+/* ── std::sort (insertion sort) ─────────────────────────────────────────── */
+
+template<typename RandomIt, typename Compare>
+void sort(RandomIt first, RandomIt last, Compare comp) {
+    if (first == last) return;
+    for (RandomIt i = first + 1; i != last; ++i) {
+        for (RandomIt j = i; j != first && comp(*j, *(j - 1)); --j) {
+            /* swap *j and *(j-1) via a temporary */
+            auto tmp = *j;
+            *j       = *(j - 1);
+            *(j - 1) = tmp;
+        }
+    }
+}
+
+/* ── std::begin / std::end ──────────────────────────────────────────────── */
+
+template<typename Container>
+auto begin(Container& c) -> decltype(c.begin()) { return c.begin(); }
+
+template<typename Container>
+auto end(Container& c) -> decltype(c.end()) { return c.end(); }
+
+template<typename Container>
+auto begin(const Container& c) -> decltype(c.begin()) { return c.begin(); }
+
+template<typename Container>
+auto end(const Container& c) -> decltype(c.end()) { return c.end(); }
+
+} /* namespace std */
+
+#endif /* OF_PC */
+#endif /* _OF_COMPAT_ALGORITHM_H */

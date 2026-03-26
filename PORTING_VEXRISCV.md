@@ -368,18 +368,153 @@ double precision would be **~1000× slower** on this target.
 
 ---
 
-## TheNextWeek and TheRestOfYourLife
+## TheNextWeek Port (`src/TheNextWeek_VexRiscV/`)
 
-The same conflicts apply to the other two books.  Additional issues for those
-volumes:
+The full port of *Ray Tracing: The Next Week* is implemented in
+`src/TheNextWeek_VexRiscV/`.  It follows the same methodology as the
+InOneWeekend port, with the additional challenges described below.
 
-- **`stb_image.h`** (TheNextWeek): uses `FILE*`, `malloc`, `fopen` etc.
-  The SDK provides these via the extended jump table (count ≥ 83) but
-  `stb_image.h` also uses `longjmp` (for error handling) which is not in
-  the SDK.  Disable JPEG support (`#define STBI_NO_JPEG`) and use PNG only.
-- **`perlin.h`**: integer arrays — no FP issues, compiles as-is.
-- **`bvh.h`**: uses `std::sort` — replace with SDK's `qsort` wrapper.
-- **`texture.h`** / **`rtw_stb_image.h`**: file I/O available via SDK's
-  extended stdio jump table.
+### Additional conflicts resolved for TheNextWeek
 
-A full port of TheNextWeek is left as future work.
+#### CONFLICT TNW-1 — `std::vector` / `<vector>` not available
+
+**Severity:** High (build failure)
+
+**Description:**  
+`hittable_list.h` and `bvh.h` use `std::vector<shared_ptr<hittable>>`.
+Unlike the InOneWeekend port (which replaced `std::vector` with a fixed-size
+array), the TheNextWeek port **preserves the dynamic vector** because `bvh_node`
+requires a mutable, sortable sequence — replacing it with a fixed array would
+change the program's logic and the BVH algorithm.
+
+**Solution implemented:**  
+`src/TheNextWeek_VexRiscV/compat/vector` — a minimal `std::vector<T>` that:
+- Allocates raw storage with `operator new(n * sizeof(T))`
+- Constructs and destroys elements via placement new / `~T()` calls
+- Exposes pointer-based iterators (`T* begin() / T* end()`)
+- Supports `push_back`, `operator[]`, `size()`, `clear()`, copy constructor
+- Is compatible with the range-based for loops and `std::sort` used in the code
+
+#### CONFLICT TNW-2 — `std::sort` / `<algorithm>` not available
+
+**Severity:** High (build failure)
+
+**Description:**  
+`bvh.h` uses `std::sort` and `std::begin`/`std::end` from `<algorithm>`.
+Eliminating the sort would break the BVH construction logic.
+
+**Solution implemented:**  
+`src/TheNextWeek_VexRiscV/compat/algorithm` — provides:
+- `std::sort(first, last, comp)` via **insertion sort** — correct O(n²)
+  alternative.  BVH construction is a build-time (not render-time) operation
+  on small arrays, so O(n²) is acceptable.  Sorting is **not eliminated**.
+- `std::begin(container)` / `std::end(container)` forwarding helpers.
+
+#### CONFLICT TNW-3 — `stb_image.h` / `std::string` / filesystem not available
+
+**Severity:** Medium (image textures not functional on embedded)
+
+**Description:**  
+`rtw_stb_image.h` uses `std::string` for path construction and `getenv`/file
+I/O for loading images.  The VexRiscV target has no accessible filesystem.
+
+**Solution implemented:**  
+`src/TheNextWeek_VexRiscV/rtw_stb_image.h` uses an `#ifdef OF_PC` guard:
+- **PC build:** full `stb_image` implementation, identical to the original.
+- **Embedded build:** stub `rtw_image` that returns `height() == 0`.
+  This activates the existing cyan fallback in `image_texture::value()` —
+  the same "no image data" debug path already present in the original code.
+
+#### CONFLICT TNW-4 — Additional `double` types in new files
+
+**Severity:** Critical (performance)
+
+**Files affected:** `aabb.h`, `bvh.h`, `perlin.h`, `texture.h`, `quad.h`,
+`constant_medium.h`, `camera.h` (background, ray_time), `material.h`
+(emitted, diffuse_light, isotropic), `sphere.h` (moving sphere, UV mapping),
+`ray.h` (time), `hittable.h` (u/v coords, rotate_y, translate).
+
+**Solution:** Same as InOneWeekend — `double` → `float` throughout, `f`
+suffix on all literals.
+
+---
+
+### TheNextWeek File Structure
+
+```
+src/TheNextWeek_VexRiscV/
+├── Makefile              SDK build + PC test build
+├── main.cpp              All 9 original scenes, SCENE=N compile-time selector
+├── rtweekend.h           Common types & utilities — float, SDK headers + random_int
+├── vec3.h                3D vector — float
+├── ray.h                 Ray — float (+ time for motion blur)
+├── color.h               Color write — float
+├── interval.h            Interval — float (+ expand, spanning ctor, operator+)
+├── aabb.h                Axis-aligned bounding box — float (new for TheNextWeek)
+├── hittable.h            Hit record + base + translate + rotate_y — float
+├── hittable_list.h       std::vector-based list + bounding_box (via compat/vector)
+├── bvh.h                 BVH — float, uses compat/algorithm (sort preserved)
+├── perlin.h              Perlin noise — float
+├── texture.h             Textures (solid, checker, image, noise) — float
+├── rtw_stb_image.h       OF_PC: full stb_image; embedded: stub (cyan fallback)
+├── material.h            All materials + diffuse_light + isotropic — float
+├── sphere.h              Sphere (stationary + moving) + UV mapping — float
+├── quad.h                Quad + box() helper — float
+├── constant_medium.h     Constant medium (volumetric) — float
+├── camera.h              Camera/renderer + background + emission — float
+└── compat/
+    ├── new               Placement new (freestanding builds)
+    ├── cmath             std:: math wrappers → SDK float ops
+    ├── limits            Minimal std::numeric_limits
+    ├── memory            Minimal std::shared_ptr / make_shared
+    ├── vector            Minimal std::vector<T> (new — TheNextWeek only)
+    └── algorithm         Minimal std::sort + std::begin/end (new — TheNextWeek only)
+```
+
+### Building TheNextWeek_VexRiscV
+
+#### Embedded build (VexRiscV app.elf)
+
+```bash
+cd src/TheNextWeek_VexRiscV
+export SDK_DIR=/path/to/openfgpaOS-SDK/src/sdk
+make                         # default scene: simple_light (4 objects)
+make CXXFLAGS=-DSCENE=7      # cornell_box
+```
+
+#### PC / host build (correctness testing)
+
+```bash
+cd src/TheNextWeek_VexRiscV
+make app_pc                  # default: simple_light (SCENE=0)
+./app_pc > out.ppm 2>/dev/null
+
+# Scene selection:
+make app_pc CXXFLAGS=-DSCENE=2   # checkered spheres
+make app_pc CXXFLAGS=-DSCENE=4   # Perlin spheres
+make app_pc CXXFLAGS=-DSCENE=5   # quads
+make app_pc CXXFLAGS=-DSCENE=6   # simple light
+make app_pc CXXFLAGS=-DSCENE=7   # Cornell box
+make app_pc CXXFLAGS=-DSCENE=8   # Cornell smoke
+```
+
+#### Notes on embedded scene selection
+
+| Scene | Description              | BVH | Image texture | Recommended for embedded |
+|-------|--------------------------|-----|---------------|--------------------------|
+| 0/6   | simple_light             | No  | No            | ✅ Yes (default)          |
+| 2     | checkered_spheres        | No  | No            | ✅ Yes                    |
+| 4     | perlin_spheres           | No  | No            | ✅ Yes                    |
+| 5     | quads                    | No  | No            | ✅ Yes                    |
+| 7     | cornell_box              | No  | No            | ⚠️ Many objects           |
+| 8     | cornell_smoke            | No  | No            | ⚠️ Many objects           |
+| 1     | bouncing_spheres         | Yes | No            | ⚠️ Heap-intensive         |
+| 3     | earth                    | No  | Yes (→ cyan)  | ⚠️ Image stub             |
+| 9     | final_scene              | Yes | Yes (→ cyan)  | ⚠️ Very slow              |
+
+---
+
+## TheRestOfYourLife
+
+The same porting methodology applies.  A port of *TheRestOfYourLife* is left
+as future work.
