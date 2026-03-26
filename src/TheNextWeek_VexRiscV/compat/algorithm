@@ -9,11 +9,22 @@
  * This header provides:
  *
  *   std::sort(first, last, comp)
- *     Insertion sort — O(n²) worst-case but simple and dependency-free.
- *     BVH construction is a build-time (not render-time) operation and
- *     operates on arrays of at most a few thousand elements, so O(n²) is
- *     acceptable.  Elements are rearranged by swapping (three assignments),
- *     which keeps reference-count churn minimal for shared_ptr elements.
+ *     Hybrid Quicksort + Insertion Sort — O(n log n) average-case.
+ *
+ *     Algorithm details:
+ *       • Median-of-three pivot selection: avoids O(n²) worst-case on
+ *         already-sorted or reverse-sorted data.
+ *       • Insertion sort for partitions of fewer than 16 elements: cheaper
+ *         than Quicksort for small ranges due to lower overhead.
+ *       • Tail-call optimization: always recurse into the smaller partition
+ *         and iterate for the larger one, bounding stack depth to O(log n).
+ *       • In-place partitioning: no dynamic memory allocation — compatible
+ *         with the 48 MB SDRAM budget on the embedded target.
+ *
+ *     This gives ~10–100× better performance than insertion sort for BVH
+ *     construction with thousands of objects while remaining dependency-free.
+ *     Elements are rearranged by swapping (three assignments), which keeps
+ *     reference-count churn minimal for shared_ptr elements.
  *
  *   std::begin(container) / std::end(container)
  *     Forwarding helpers that call container.begin() / container.end().
@@ -29,17 +40,100 @@
 
 namespace std {
 
-/* ── std::sort (insertion sort) ─────────────────────────────────────────── */
+/* ── internal helpers ───────────────────────────────────────────────────── */
+
+namespace _compat_detail {
+
+/* Swap two values via move — avoids reference-count bumps for shared_ptr.
+ * Uses static_cast<T&&> (a core language feature) rather than std::move so
+ * that no library header is required in the freestanding build environment. */
+template<typename T>
+inline void swap_val(T& a, T& b) {
+    T tmp = static_cast<T&&>(a);
+    a     = static_cast<T&&>(b);
+    b     = static_cast<T&&>(tmp);
+}
+
+/* Insertion sort for small ranges [first, last).
+ * O(n²) but with very low constant — optimal for n < 16. */
+template<typename RandomIt, typename Compare>
+void insertion_sort(RandomIt first, RandomIt last, Compare comp) {
+    if (first == last) return;
+    for (RandomIt i = first + 1; i != last; ++i) {
+        for (RandomIt j = i; j != first && comp(*j, *(j - 1)); --j)
+            swap_val(*j, *(j - 1));
+    }
+}
+
+/* Median-of-three: reorder *a, *b, *c so that *b holds the median value
+ * according to comp, and return b as the pivot iterator. */
+template<typename RandomIt, typename Compare>
+RandomIt median_of_three(RandomIt a, RandomIt b, RandomIt c, Compare comp) {
+    if (comp(*b, *a)) swap_val(*a, *b);
+    if (comp(*c, *b)) swap_val(*b, *c);
+    if (comp(*b, *a)) swap_val(*a, *b);
+    return b;
+}
+
+/* Lomuto-style partition around the pivot value already placed at (last - 1).
+ * Returns iterator to the pivot's final position. */
+template<typename RandomIt, typename Compare>
+RandomIt partition(RandomIt first, RandomIt last, Compare comp) {
+    RandomIt last_elem = last - 1; /* pivot is stored here */
+
+    /* Partition [first, last_elem): elements less than pivot go left. */
+    RandomIt store = first;
+    for (RandomIt it = first; it != last_elem; ++it) {
+        if (comp(*it, *last_elem)) {
+            swap_val(*it, *store);
+            ++store;
+        }
+    }
+    /* Place pivot at its sorted position. */
+    swap_val(*store, *last_elem);
+    return store;
+}
+
+} /* namespace _compat_detail */
+
+/* ── std::sort (hybrid Quicksort + Insertion Sort) ──────────────────────── */
 
 template<typename RandomIt, typename Compare>
 void sort(RandomIt first, RandomIt last, Compare comp) {
-    if (first == last) return;
-    for (RandomIt i = first + 1; i != last; ++i) {
-        for (RandomIt j = i; j != first && comp(*j, *(j - 1)); --j) {
-            /* swap *j and *(j-1) via a temporary */
-            auto tmp = *j;
-            *j       = *(j - 1);
-            *(j - 1) = tmp;
+    /* Tail-call loop: handle the larger partition iteratively to keep
+     * stack depth bounded to O(log n). */
+    while (last - first > 1) {
+        /* Use insertion sort for small ranges. */
+        if (last - first < 16) {
+            _compat_detail::insertion_sort(first, last, comp);
+            return;
+        }
+
+        /* Median-of-three pivot selection: examine first, mid, last-1.
+         * After the call *mid holds the median.  Because last-first >= 16,
+         * mid != last-1, so the subsequent swap safely places the median at
+         * last-1 without disturbing any other element of the triple. */
+        RandomIt mid = first + (last - first) / 2;
+        RandomIt pivot = _compat_detail::median_of_three(first, mid, last - 1, comp);
+
+        /* Move the median (pivot) to last-1 so partition() can use it. */
+        _compat_detail::swap_val(*pivot, *(last - 1));
+
+        /* Partition and get the pivot's final position. */
+        RandomIt p = _compat_detail::partition(first, last, comp);
+
+        /* Recurse into the smaller partition; iterate over the larger one. */
+        RandomIt left_last  = p;
+        RandomIt right_first = p + 1;
+
+        if (left_last - first < last - right_first) {
+            /* Left side is smaller — recurse left, loop right. */
+            sort(first, left_last, comp);
+            first = right_first;
+        } else {
+            /* Right side is smaller (or equal) — recurse right, loop left. */
+            sort(right_first, last, comp);
+            last = left_last;
         }
     }
 }
