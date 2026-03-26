@@ -1,0 +1,134 @@
+/* compat/vector — Minimal std::vector<T> for openfpgaOS / VexRiscV RV32IMF
+ *
+ * When OF_PC is defined (native PC build) this header simply includes the
+ * real <vector> from the system so that correctness tests work on the host.
+ *
+ * The standard <vector> header is part of libstdc++, which is not available
+ * in the SDK's freestanding build environment.
+ *
+ * This header provides a minimal dynamic array that:
+ *   - Uses operator new / operator delete (provided by of_cxxabi.cpp)
+ *   - Uses placement new (compat/new) for in-place construction/destruction
+ *   - Supports push_back, operator[], size(), clear()
+ *   - Exposes T* iterators (begin()/end()) compatible with std::sort / std::begin
+ *   - Supports copy construction and assignment (needed by bvh_node copy of list)
+ *   - Requires no exceptions (-fno-exceptions compatible)
+ *   - Requires no RTTI (-fno-rtti compatible)
+ *
+ * Growth strategy: double capacity starting from 8 (same as most STL impls).
+ *
+ * Memory layout: raw bytes allocated with operator new(n * sizeof(T)),
+ * objects constructed/destroyed individually via placement new / ~T().
+ * This avoids array-new (operator new[]) which may require __cxa_vec_new.
+ */
+#ifndef _OF_COMPAT_VECTOR_H
+#define _OF_COMPAT_VECTOR_H
+
+#ifdef OF_PC
+/* Native PC build: use the real C++ standard library. */
+#include <vector>
+#else /* embedded VexRiscV build */
+
+#include "compat/new"   /* placement new / delete */
+
+namespace std {
+
+template<typename T>
+class vector {
+public:
+    typedef T*       iterator;
+    typedef const T* const_iterator;
+    typedef unsigned int size_type;
+
+    /* ── Constructors / destructor ─────────────────────────────────────── */
+
+    vector() : _data(nullptr), _sz(0), _cap(0) {}
+
+    vector(const vector& o) : _data(nullptr), _sz(0), _cap(0) {
+        _reserve(o._sz);
+        for (size_type i = 0; i < o._sz; i++)
+            new(_data + i) T(o._data[i]);
+        _sz = o._sz;
+    }
+
+    vector& operator=(const vector& o) {
+        if (this == &o) return *this;
+        _destroy_range(0, _sz);
+        operator delete(_data);
+        _data = nullptr; _sz = 0; _cap = 0;
+        _reserve(o._sz);
+        for (size_type i = 0; i < o._sz; i++)
+            new(_data + i) T(o._data[i]);
+        _sz = o._sz;
+        return *this;
+    }
+
+    ~vector() {
+        _destroy_range(0, _sz);
+        operator delete(_data);
+    }
+
+    /* ── Modifiers ──────────────────────────────────────────────────────── */
+
+    void push_back(const T& v) {
+        if (_sz == _cap) _grow();
+        new(_data + _sz) T(v);
+        _sz++;
+    }
+
+    void clear() {
+        _destroy_range(0, _sz);
+        _sz = 0;
+    }
+
+    /* ── Element access ─────────────────────────────────────────────────── */
+
+    T&       operator[](size_type i)       { return _data[i]; }
+    const T& operator[](size_type i) const { return _data[i]; }
+
+    /* ── Capacity ───────────────────────────────────────────────────────── */
+
+    size_type size()  const { return _sz; }
+    bool      empty() const { return _sz == 0; }
+
+    /* ── Iterators (pointer-based, compatible with std::sort) ───────────── */
+
+    iterator       begin()       { return _data; }
+    iterator       end()         { return _data + _sz; }
+    const_iterator begin() const { return _data; }
+    const_iterator end()   const { return _data + _sz; }
+
+private:
+    T*        _data;
+    size_type _sz;
+    size_type _cap;
+
+    void _destroy_range(size_type from, size_type to) {
+        for (size_type i = from; i < to; i++)
+            _data[i].~T();
+    }
+
+    /* Allocate raw storage for n elements; copy-construct existing elements,
+     * destroy old ones, then free old raw storage.                          */
+    void _reserve(size_type n) {
+        if (n <= _cap) return;
+        void* raw = operator new(n * sizeof(T));
+        T* nd = static_cast<T*>(raw);
+        for (size_type i = 0; i < _sz; i++) {
+            new(nd + i) T(_data[i]);
+            _data[i].~T();
+        }
+        operator delete(_data);
+        _data = nd;
+        _cap  = n;
+    }
+
+    void _grow() {
+        _reserve(_cap == 0u ? 8u : _cap * 2u);
+    }
+};
+
+} /* namespace std */
+
+#endif /* OF_PC */
+#endif /* _OF_COMPAT_VECTOR_H */
